@@ -1,46 +1,55 @@
-from db_analysis import LotteryDatabase
-from collections import Counter, defaultdict
-from config import config
-from heapq import nlargest, nsmallest
-from itertools import combinations
 import csv
 import random
 import time
 import datetime
 import math
 
+from PyQt5.QtCore import Qt
+from heapq import nlargest, nsmallest
+from itertools import combinations
+from collections import Counter, defaultdict
+
+from db_models import *
+from db_manage import LotteryDatabase
+
 
 class ConvertMain:
 
-    def __init__(self, worker, last_draw=None, limit=0):
+    def __init__(self, worker, initial_table=True, last_draw=None, limit=0):
 
         # class initialize
         self.worker = worker
         self.table_name = self.worker.table_name
+        self.game_name = self.worker.window.line_current_game.text()
 
-        if self.table_name != 'EMPTY':
+        if initial_table:
 
-            self.curr_game = config['games']['mini_lotto']
+            self.ldb = LotteryDatabase()
+
+            self.curr_game = self.ldb.db_fetchone(LottoGame, {'game_name': self.game_name})
+            self.ldb_original = 'INPUT_' + self.curr_game.game_table
 
             # features
-            table_headers = []
-            self.features = self.curr_game['features']
-            for i in range(self.worker.window.list_model.count()):
-                feature_len = self.features[self.worker.window.list_model.item(i).text()]['length'] + 1
-                feature_header = self.features[self.worker.window.list_model.item(i).text()]['header']
-                table_headers += [feature_header + str(n) + ' INTEGER' for n in range(1, feature_len)]
+            table_headers = [Column('id', Integer, primary_key=True),
+                             Column('DRAFT_ID', Integer)]
+
+            self.features = self.curr_game.model_features
+
+            for feature in self.features:
+                match_items = self.worker.window.list_model.findItems(feature.feature_name, Qt.MatchExactly)
+                if len(match_items) > 0:
+                    feature_len = feature.feature_length + 1
+                    feature_header = feature.feature_header
+                    table_headers += [Column(feature_header + str(n), Integer) for n in range(1, feature_len)]
+
+            table_headers += [Column('LABEL', Integer)]
 
             # db_initialize
 
-            self.__table = ",".join(['ID INTEGER PRIMARY KEY'] +
-                                    ['DRAFT_ID INTEGER'] + table_headers + ['LABEL INTEGER'])
-
-            self.ldb_original = 'INPUT_' + self.curr_game['database']
-            self.ldb = LotteryDatabase(config['database'])
             self.ldb.db_delete_table(self.table_name)
-            self.ldb.db_create_table(self.table_name, self.__table)
+            self.ldb.db_create_table(self.table_name, table_headers)
 
-            self.original_len = self.ldb.db_get_length(self.ldb_original) + 1 - limit
+            self.original_len = self.ldb.db_get_length(self.ldb_original, True) + 1 - limit
 
             # variables
             if last_draw is None:
@@ -48,9 +57,9 @@ class ConvertMain:
             else:
                 self.last_draw = last_draw
 
-            self.lottery_interval = self.curr_game['length'] + 1
+            self.lottery_interval = self.curr_game.total_numbers + 1
             self.training_size = int(self.worker.window.combo_test_size.currentText())
-            self.cut = self.features['original_numbers']['length'] + 1
+            self.cut = self.curr_game.game_len + 1
 
             self.labels = [0, 12, 34, 56]
             self.win = [1]
@@ -199,7 +208,7 @@ class ConvertMain:
 
     def create_prediction_model(self, input_array):
 
-        self.ldb = LotteryDatabase(config['database'])
+        self.ldb = LotteryDatabase()
         list_model = self.worker.window.list_model
 
         my_list = list(map(int, input_array.split(" ")))
@@ -281,7 +290,7 @@ class ConvertMain:
 
     def convert_to_original(self):
 
-        self.ldb = LotteryDatabase(config['database'])
+        self.ldb = LotteryDatabase()
         combo_predict = self.worker.window.combo_predict_model
         self.table_name = 'PREDICT_' + combo_predict.currentText()
 
@@ -313,7 +322,7 @@ class ConvertMain:
 
     def __get_latest_number_cycle(self):
 
-        self.ldb = LotteryDatabase(config['database'])
+        self.ldb = LotteryDatabase()
 
         curr_cycle = []
         fetch_one = []
@@ -330,7 +339,7 @@ class ConvertMain:
 
     def __get_latest_draw(self):
 
-        self.ldb = LotteryDatabase(config['database'])
+        self.ldb = LotteryDatabase()
 
         curr_draw = []
         fetch_one = []
@@ -352,7 +361,7 @@ class ConvertMain:
         sql_ct = str.format("SELECT * FROM {} limit {} offset {}", self.ldb_original, 100, offset-100)
 
         self.ldb.db_execute(sql_ct)
-        last = self.ldb.c.fetchmany(offset)
+        last = self.ldb.db_fetchmany(offset)
 
         for sample in last:
             for s in sample[1:self.cut]:
@@ -388,19 +397,19 @@ class ConvertMain:
 
     def get_latest_top(self):
 
-        self.ldb = LotteryDatabase(config['database'])
+        self.ldb = LotteryDatabase()
 
         top_numbers = self.__create_top_numbers(self.original_len-100)
 
         return top_numbers
 
-    def __add_random(self, o_num):
+    def __add_random(self, o_num, random_size=42):
 
         while True:
             r = random.randrange(1, self.lottery_interval)
             if r not in o_num:
                 o_num = o_num + [r]
-                if len(o_num) == 42:
+                if len(o_num) == random_size:
                     o_num.sort()
                     break
         # self.training_size
@@ -408,8 +417,7 @@ class ConvertMain:
 
     def create_training_model(self):
 
-        self.ldb = LotteryDatabase(config['database'])
-        # self.ldb.db_execute('PRAGMA synchronous=OFF')
+        session = self.ldb.session()
         list_model = self.worker.window.list_model
 
         ids = 1
@@ -426,9 +434,8 @@ class ConvertMain:
             curr_draw = self.__append_in_last_draw(fetch_one[1:self.cut], curr_draw)
             top_numbers = self.__create_top_numbers(o)
 
-            self.ldb.db_commit()
             fetch_one = list(self.ldb.db_fetchone(self.ldb_original, o))
-            my_list = self.__add_random(fetch_one[1:self.cut])
+            my_list = self.__add_random(fetch_one[1:self.cut], self.training_size)
 
             end_time = time.time()
             avg_time = (avg_time + (end_time - start_time)) / o
@@ -548,7 +555,7 @@ class ConvertMain:
 
     def __create_rash_group(self):
 
-        self.ldb = LotteryDatabase(config['database'])
+        self.ldb = LotteryDatabase()
         fetch_a = self.ldb.db_execute(self.ldb_original)
 
         first_data_group = defaultdict(int)

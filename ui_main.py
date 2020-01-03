@@ -1,13 +1,16 @@
 import sys
 import inspect
+import traceback
+
 import qdarkstyle
-from configparser import ConfigParser
-from config import config
+from PyQt5 import QtCore, QtGui, uic
+from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog
+
+from db_models import *
+from games_config import *
 from convert import ConvertMain
-from db_analysis import LotteryDatabase
+from db_manage import LotteryDatabase
 from machine_learning import MachineLearning
-from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog, QInputDialog, QLineEdit
-from PyQt5 import QtCore, uic
 
 Ui_MainWindow, QtBaseClass = uic.loadUiType(r'UI\interface.ui')
 Ui_AddDialog, QtBaseAddClass = uic.loadUiType(r'UI\add_feature.ui')
@@ -23,10 +26,13 @@ class Window(QtBaseClass, Ui_MainWindow):
         #  class initialize
         self.setupUi(self)
         self.worker = ThreadClass(self)
-        self.ldb = LotteryDatabase(config['database'])
+        self.ldb = LotteryDatabase(True)
         self.update_algorithms()
         self.update_combobox_ml()
         self.get_user_settings()
+
+        # sys.stdout = OutLog(self.stdout_text, sys.stdout, QtGui.QColor(255, 255, 255))
+        # sys.stderr = OutLog(self.stdout_text, sys.stderr, QtGui.QColor(255, 255, 255))
 
         #  variables
         self.select_thread = None
@@ -46,7 +52,8 @@ class Window(QtBaseClass, Ui_MainWindow):
         self.push_predict.clicked.connect(self.process_input)
         self.push_embedded.clicked.connect(self.process_embedded)
         self.push_add.clicked.connect(self.load_add_ui)
-        self.push_ml.clicked.connect(self.machine_learning)
+        self.push_ml.clicked.connect(self.sklearn_ml)
+        self.push_knn.clicked.connect(self.keras_ml)
 
         # menu bar actions
         self.actionDatabase_Manager.triggered.connect(self.load_db_manager)
@@ -61,42 +68,48 @@ class Window(QtBaseClass, Ui_MainWindow):
         self.combo_test_size.setToolTip('Determine testing size for each sample.')
 
     def save_user_settings(self):
-        user_config = ConfigParser()
-        user_config['MODEL'] = {'check_add_random': self.check_add_random.isChecked(),
-                                'check_win_loss': self.check_win_loss.isChecked(),
-                                'combo_db': self.combo_db.currentIndex(),
-                                'combo_test_size': self.combo_test_size.currentIndex()
-                                }
 
-        user_config['ML ALGORITHMS'] = {}
-        for i in range(self.list_ml.count()):
-            user_config['ML ALGORITHMS'][self.list_ml.item(i).text()] = self.list_ml.item(i).text()
+        list_model = '|'.join([str(self.list_model.item(i).text()) for i in range(self.list_model.count())])
 
-        user_config['PREDICT'] = {'combo_predict_model': self.combo_predict_model.currentIndex(),
-                                  'combo_predict_ml': self.combo_predict_ml.currentIndex()
-                                  }
+        user_config = {'check_win_loss': self.check_win_loss.isChecked(),
+                       'check_add_random': self.check_add_random.isChecked(),
+                       'check_latest': self.check_latest.isChecked(),
+                       'check_sampling': self.check_sampling.isChecked(),
+                       'check_keras': self.check_keras.isChecked(),
 
-        user_config['FEATURES'] = {}
-        for i in range(self.list_model.count()):
-            user_config['FEATURES'][self.list_model.item(i).text()] = self.list_model.item(i).text()
+                       'combo_predict_model': self.combo_predict_model.currentText(),
+                       'combo_predict_ml': self.combo_predict_ml.currentText(),
+                       'combo_db': self.combo_db.currentText(),
+                       'combo_test_size': self.combo_test_size.currentText(),
+                       'combo_scoring': self.combo_scoring.currentText(),
 
-        with open(config['user'], 'w') as configfile:
-            user_config.write(configfile)
+                       'list_model': list_model}
+
+        self.ldb.db_update(UserSettings,
+                           {'user_parent': 'default',
+                            'line_current_game': self.line_current_game.text()},
+                           user_config)
 
     def get_user_settings(self):
 
-        user_config = ConfigParser()
-        user_config.read(config['user'])
+        user_config = self.ldb.db_fetchone(UserSettings, {'user_parent': 'default',
+                                                          'line_current_game': self.line_current_game.text()})
 
-        self.check_win_loss.setChecked(user_config.getboolean('MODEL', 'check_win_loss'))
-        self.check_add_random.setChecked(user_config.getboolean('MODEL', 'check_add_random'))
-        self.combo_predict_model.setCurrentIndex(user_config.getint('PREDICT', 'combo_predict_model'))
-        self.combo_predict_ml.setCurrentIndex(user_config.getint('PREDICT', 'combo_predict_ml'))
-        self.combo_db.setCurrentIndex(user_config.getint('MODEL', 'combo_db'))
-        self.combo_test_size.setCurrentIndex(user_config.getint('MODEL', 'combo_test_size'))
+        self.check_win_loss.setChecked(user_config.check_win_loss)
+        self.check_add_random.setChecked(user_config.check_add_random)
+        self.check_latest.setChecked(user_config.check_latest)
+        self.check_sampling.setChecked(user_config.check_sampling)
+        self.check_keras.setChecked(user_config.check_keras)
 
-        for each_key in user_config.items('FEATURES'):
-            self.list_model.addItem(each_key[1])
+        self.combo_predict_model.setCurrentText(user_config.combo_predict_model)
+        self.combo_predict_ml.setCurrentText(user_config.combo_predict_ml)
+        self.combo_db.setCurrentText(user_config.combo_db)
+        self.combo_test_size.setCurrentText(user_config.combo_test_size)
+        self.combo_scoring.setCurrentText(user_config.combo_scoring)
+
+        if user_config.list_model != '':
+            for each_key in user_config.list_model.split("|"):
+                self.list_model.addItem(each_key)
 
     def load_add_ui(self):
         feature_dialog = ModelAddDialog(self)
@@ -119,14 +132,15 @@ class Window(QtBaseClass, Ui_MainWindow):
         self.list_model.addItem(item)
 
     def update_algorithms(self):
-        # self.list_ml.addItem('RandomForestClassifier')
-        # self.list_ml.addItem('RandomForestRegressor')
-        # self.list_ml.addItem('LogisticRegression')
+        self.list_ml.addItem('RandomForestClassifier')
+        self.list_ml.addItem('RandomForestRegressor')
+        self.list_ml.addItem('LogisticRegression')
         self.list_ml.addItem('SGDClassifier')
 
     def update_combobox_ml(self):
 
-        tables = self.ldb.db_fetch_tables()
+        tables = self.ldb.db_fetchall(DatabaseModels, {})
+
         self.combo_predict_model.clear()
         self.combo_db.clear()
         self.combo_test_size.clear()
@@ -135,11 +149,11 @@ class Window(QtBaseClass, Ui_MainWindow):
         for alg in range(self.list_ml.count()):
             self.combo_predict_ml.addItem(self.list_ml.item(alg).text())
 
-        for tab in tables:
-            if tab[0][:5] == 'MODEL':
-                self.combo_db.addItem(tab[0][6:])
-            elif tab[0][:7] == 'PREDICT':
-                self.combo_predict_model.addItem(tab[0][8:])
+        for table in tables:
+            if table.database_name.startswith('MODEL_'):
+                self.combo_db.addItem(table.database_name.replace('MODEL_', ''))
+            elif table.database_name.startswith('PREDICT_'):
+                self.combo_predict_model.addItem(table.database_name.replace('PREDICT_', ''))
 
         for n in range(6, 13):
             self.combo_test_size.addItem(str(n))
@@ -161,7 +175,11 @@ class Window(QtBaseClass, Ui_MainWindow):
 
             self.progress_ml.setValue(progress_val)
 
-    def machine_learning(self):
+    def sklearn_ml(self):
+        self.select_thread = inspect.stack()[0][3]
+        self.worker.start()
+
+    def keras_ml(self):
         self.select_thread = inspect.stack()[0][3]
         self.worker.start()
 
@@ -240,7 +258,7 @@ class Window(QtBaseClass, Ui_MainWindow):
             sys.exit()
 
     def program_version(self):
-        self.info_box('Program Version', config['version'])
+        self.info_box('Program Version', VERSION)
 
 
 class ModelAddDialog(QtBaseAddClass, Ui_AddDialog):
@@ -253,55 +271,65 @@ class ModelAddDialog(QtBaseAddClass, Ui_AddDialog):
 
         # class initialize
         self.setupUi(self)
-        self.list_add_available_init()
         self.window = window
+        self.ldb = LotteryDatabase()
+        self.list_add_available_init()
 
         #  signals
-        self.signal_add_to_list.connect(self.list_add_applied_init)
+        self.signal_add_to_list.connect(self.list_add_selected)
 
         #  buttons
-        self.push_add_cancel.clicked.connect(self.close_dialog)
-        self.push_add_move.clicked.connect(self.move_feature)
-        self.push_add_moveback.clicked.connect(self.move_back_feature)
         self.push_add_ok.clicked.connect(self.add_feature)
+        self.push_add_cancel.clicked.connect(self.close_dialog)
+        self.feature_add.clicked.connect(self.list_add_selected)
+        self.feature_remove.clicked.connect(self.list_remove_selected)
 
-    def list_add_applied_init(self, item):
-        self.list_add_applied.addItem(item)
+        self.feature_sortUp.clicked.connect(self.move_item_up)
+        self.feature_sortDown.clicked.connect(self.move_item_down)
+
+    def list_add_selected(self):
+        for item in self.list_add_available.selectedItems():
+            if not self.list_feature_order.findItems(item.text(), QtCore.Qt.MatchExactly):
+                self.list_feature_order.addItem(item.text())
+
+    def list_remove_selected(self):
+        self.list_feature_order.takeItem(self.list_feature_order.currentRow())
+
+    def move_item_up(self):
+        if self.list_feature_order.currentRow() > 0:
+            current_row = self.list_feature_order.currentRow()
+            current_item = self.list_feature_order.takeItem(current_row)
+            self.list_feature_order.insertItem(current_row - 1, current_item)
+            self.list_feature_order.setCurrentRow(current_row - 1)
+            self.list_feature_order.item(current_row - 1).setSelected(True)
+
+    def move_item_down(self):
+        if self.list_feature_order.currentRow() < self.list_feature_order.count() - 1:
+            current_row = self.list_feature_order.currentRow()
+            current_item = self.list_feature_order.takeItem(current_row)
+            self.list_feature_order.insertItem(current_row + 1, current_item)
+            self.list_feature_order.setCurrentRow(current_row + 1)
+            self.list_feature_order.item(current_row + 1).setSelected(True)
 
     def list_add_available_init(self):
-
-        for f in config['games']['mini_lotto']['features']:
-            self.list_add_available.addItem(f)
+        features = self.ldb.db_fetchall(ModelFeatures, {'game': self.window.line_current_game.text()})
+        for feature in features:
+            self.list_add_available.addItem(feature.feature_name)
 
     def add_feature(self):
 
         duplicate_check = False
         self.window.list_model.clear()
 
-        for i in range(self.list_add_applied.count()):
+        for i in range(self.list_feature_order.count()):
             for j in range(self.window.list_model.count()):
-                if self.list_add_applied.item(i).text() == self.window.list_model.item(j).text():
+                if self.list_feature_order.item(i).text() == self.window.list_model.item(j).text():
                     duplicate_check = True
 
             if not duplicate_check:
-                self.signal_add_to_model.emit(self.list_add_applied.item(i).text())
+                self.signal_add_to_model.emit(self.list_feature_order.item(i).text())
 
         self.close_dialog()
-
-    def move_feature(self):
-        curr_item = self.list_add_available.currentItem().text()
-
-        duplicate_check = False
-
-        for i in range(self.list_add_applied.count()):
-            if self.list_add_applied.item(i).text() == curr_item:
-                duplicate_check = True
-
-        if not duplicate_check:
-            self.list_add_applied.addItem(curr_item)
-
-    def move_back_feature(self):
-        self.list_add_applied.takeItem(self.list_add_applied.currentRow())
 
     def close_dialog(self):
         self.close()
@@ -315,7 +343,7 @@ class DatabaseManagerDialog(QtBaseDbClass, Ui_DbDialog):
         # class initialize
         self.setupUi(self)
         self.window = window
-        self.ldb = LotteryDatabase(config['database'])
+        self.ldb = LotteryDatabase()
         self.db_manager_init()
 
         # variables
@@ -323,71 +351,90 @@ class DatabaseManagerDialog(QtBaseDbClass, Ui_DbDialog):
         self.created = {}
 
         # buttons
-        self.push_db_add.clicked.connect(self.create_database)
-        self.push_db_delete.clicked.connect(self.delete_database)
-        self.push_db_save.clicked.connect(self.save_database)
-        self.push_db_cancel.clicked.connect(self.close_db_manager)
+        self.btn_add_model.clicked.connect(self.add_model)
+        self.btn_delete_model.clicked.connect(self.delete_model)
+
+        self.btn_add_predict.clicked.connect(self.add_predict)
+        self.btn_delete_predict.clicked.connect(self.delete_predict)
+
+        self.btn_save.clicked.connect(self.save_database)
+        self.btn_cancel.clicked.connect(self.close_db_manager)
 
     def db_manager_init(self):
 
-        tables = self.ldb.db_fetch_tables()
+        models = self.ldb.db_fetchall(DatabaseModels, {})
 
-        for tab in tables:
-            if tab[0][:5] == 'MODEL':
-                self.list_model_db.addItem(tab[0][6:])
-            elif tab[0][:5] == 'INPUT':
-                self.list_input_db.addItem(tab[0][6:])
-            else:
-                self.list_predict_db.addItem(tab[0][8:])
+        for model in models:
+            if model.database_name.startswith('MODEL_'):
+                self.list_model_db.addItem(model.database_name.replace('MODEL_', ''))
+            elif model.database_name.startswith('PREDICT_'):
+                self.list_predict_db.addItem(model.database_name.replace('PREDICT_', ''))
 
-    def create_database(self):
+    def add_model(self):
 
-        text, ok_pressed = QInputDialog.getText(self, "Create Database", "Database Name:", QLineEdit.Normal, "")
-        if ok_pressed and text != '':
-            text = text.strip()
+        text = self.line_model.text().strip()
+
+        if text != '':
             if ' ' in text:
-                QMessageBox.information(self, 'Whitespace', 'Your database name contain whitespaces. Please check!')
+                QMessageBox.information(self,
+                                        'Whitespace',
+                                        'Your database name contain whitespaces. Please check!')
             else:
-                if self.db_tabs.currentIndex() == 0:
-                    self.created[text] = 0
-                    self.list_input_db.addItem(text)
-                elif self.db_tabs.currentIndex() == 1:
-                    self.created[text] = 1
-                    self.list_model_db.addItem(text)
+                if self.list_model_db.findItems(text, QtCore.Qt.MatchExactly):
+                    QMessageBox.information(self,
+                                            'Already exist',
+                                            'Your database name already exist. Try again!')
                 else:
-                    self.created[text] = 2
+                    self.created[text] = 0
+                    self.list_model_db.addItem(text)
+
+    def add_predict(self):
+
+        text = self.line_predict.text().strip()
+
+        if text != '':
+            if ' ' in text:
+                QMessageBox.information(self,
+                                        'Whitespace',
+                                        'Your database name contain whitespaces. Please check!')
+            else:
+                if self.list_predict_db.findItems(text, QtCore.Qt.MatchExactly):
+                    QMessageBox.information(self,
+                                            'Already exist',
+                                            'Your database name already exist. Try again!')
+                else:
+                    self.created[text] = 1
                     self.list_predict_db.addItem(text)
 
-    def delete_database(self):
-        if self.db_tabs.currentIndex() == 0:
-            self.deleted[self.list_input_db.currentItem().text()] = 0
-            self.list_input_db.takeItem(self.list_input_db.currentRow())
-        elif self.db_tabs.currentIndex() == 1:
-            self.deleted[self.list_model_db.currentItem().text()] = 1
+    def delete_model(self):
+        if len(self.list_model_db.selectedItems()) > 0:
+            self.deleted[self.list_model_db.currentItem().text()] = 0
             self.list_model_db.takeItem(self.list_model_db.currentRow())
-        else:
-            self.deleted[self.list_model_db.currentItem().text()] = 2
-            self.list_model_db.takeItem(self.list_predict_db.currentRow())
+
+    def delete_predict(self):
+        if len(self.list_predict_db.selectedItems()) > 0:
+            self.deleted[self.list_predict_db.currentItem().text()] = 1
+            self.list_predict_db.takeItem(self.list_predict_db.currentRow())
 
     def save_database(self):
 
-        for x, y in self.deleted.items():
-            if y == 0:
-                self.ldb.db_delete_table(str.format('INPUT_{}', x))
-            elif y == 1:
-                self.ldb.db_delete_table(str.format('MODEL_{}', x))
-            else:
-                self.ldb.db_delete_table(str.format('PREDICT_{}', x))
+        self.window.combo_db.clear()
+        self.window.combo_predict_model.clear()
 
-        for x, y in self.created.items():
-            if y == 0:
-                self.ldb.db_create_table(str.format('INPUT_{}', x), 'ID INTEGER PRIMARY KEY')
-            elif y == 1:
-                self.ldb.db_create_table(str.format('MODEL_{}', x), 'ID INTEGER PRIMARY KEY')
-            else:
-                self.ldb.db_create_table(str.format('PREDICT_{}', x), 'ID INTEGER PRIMARY KEY')
+        for key, value in self.deleted.items():
+            if value == 0:
+                self.ldb.db_delete_record(DatabaseModels, {'database_name': 'MODEL_' + key})
+            elif value == 1:
+                self.ldb.db_delete_record(DatabaseModels, {'database_name': 'PREDICT_' + key})
 
-        self.window.update_combobox_ml()
+        for key, value in self.created.items():
+            if value == 0:
+                self.ldb.db_add_record(DatabaseModels, {'database_name': 'MODEL_' + key})
+                self.window.combo_db.addItem(key)
+            elif value == 1:
+                self.ldb.db_add_record(DatabaseModels, {'database_name': 'PREDICT_' + key})
+                self.window.combo_predict_model.addItem(key)
+
         self.close_db_manager()
 
     def close_db_manager(self):
@@ -407,7 +454,10 @@ class ThreadClass(QtCore.QThread):
         self.table_name = ''
 
     def run(self):
-        if self.window.select_thread == "process_input":
+
+        process_name = self.window.select_thread
+
+        if process_name == "process_input":
 
             if self.window.input_line.text() == "":
                 self.signal_infobox.emit('Missing input', 'No input numbers to proceed. Please try again.')
@@ -422,73 +472,70 @@ class ThreadClass(QtCore.QThread):
                     ml.random_forest_predict()
                     self.signal_progress_bar.emit(0)
                     self.signal_infobox.emit('Completed', 'Prediction model created!')
-                except Exception as e:
-                    self.signal_infobox.emit('Error', 'Something went wrong!! ' + str(e))
+                except Exception as exc:
+                    self.signal_infobox.emit('Error', 'Something went wrong!! ' + str(exc))
                     self.signal_progress_bar.emit(0)
 
-        elif self.window.select_thread == 'update_la_jolla':
+        elif process_name == 'update_la_jolla':
 
-            ldb = LotteryDatabase(config['database'])
             try:
-
+                ldb = LotteryDatabase()
                 imported, rejected = ldb.db_import_la_jolla()
                 self.signal_infobox.emit('Completed', str.format(
                     'Lottery data imported! \n Imported: {} \n Rejected: {}', imported, rejected))
 
-            except Exception as e:
+            except Exception as exc:
 
-                self.signal_infobox.emit('Error', 'Something went wrong!! ' + str(e))
+                self.signal_infobox.emit('Error', 'Something went wrong!! ' + str(exc))
                 self.signal_progress_bar.emit(0)
 
-        elif self.window.select_thread == "create_model":
+        elif process_name == "create_model":
 
-            self.table_name = 'MODEL_' + self.window.combo_db.currentText()
+            if self.window.combo_db.currentText() != '':
 
-            self.signal_qbox.emit('Create', 'Do you want create new model?')
+                self.table_name = 'MODEL_' + self.window.combo_db.currentText()
+                self.signal_qbox.emit('Create', 'Do you want create new model?')
 
-            while self.window.response == '':
-                pass
+                while self.window.response is None:
+                    pass
 
-            if self.window.response == QMessageBox.Yes:
-                self.window.response = ''
+                if self.window.response == QMessageBox.Yes:
+                    self.window.response = None
 
-                try:
-                    convert = ConvertMain(self)
+                    try:
+                        convert = ConvertMain(self)
 
-                    if self.window.check_win_loss.isChecked():
+                        if self.window.check_win_loss.isChecked():
 
-                        win, loss = convert.create_training_model()
+                            win, loss = convert.create_training_model()
+                            self.signal_progress_bar.emit(0)
+                            self.signal_infobox.emit('Completed', 'Training model created! \n' +
+                                                     'Win Classification: ' + str(win) + '\n' +
+                                                     'Loss Classification: ' + str(loss))
+
+                        else:
+
+                            zero, one, two, three, four = convert.create_training_model()
+                            self.signal_progress_bar.emit(0)
+                            self.signal_infobox.emit('Completed', 'Training model created! \n' +
+                                                     'First Classification: ' + str(zero) + '\n' +
+                                                     'Second Classification: ' + str(one) + '\n' +
+                                                     'Third Classification: ' + str(two) + '\n' +
+                                                     'Fourth Classification: ' + str(three) + '\n' +
+                                                     'Fifth Classification: ' + str(four))
+
+                    except Exception as exc:
+                        self.signal_infobox.emit('Error', 'Something went wrong!! ' + str(exc))
                         self.signal_progress_bar.emit(0)
-                        self.signal_infobox.emit('Completed', 'Training model created! \n' +
-                                                 'Win Classification: ' + str(win) + '\n' +
-                                                 'Loss Classification: ' + str(loss))
 
-                    else:
+        elif process_name == "process_embedded":
 
-                        zero, one, two, three, four = convert.create_training_model()
-                        self.signal_progress_bar.emit(0)
-                        self.signal_infobox.emit('Completed', 'Training model created! \n' +
-                                                 'First Classification: ' + str(zero) + '\n' +
-                                                 'Second Classification: ' + str(one) + '\n' +
-                                                 'Third Classification: ' + str(two) + '\n' +
-                                                 'Fourth Classification: ' + str(three) + '\n' +
-                                                 'Fifth Classification: ' + str(four))
-
-                except Exception as e:
-                    self.signal_infobox.emit('Error', 'Something went wrong!! ' + str(e))
-                    self.signal_progress_bar.emit(0)
-
-            else:
-                pass
-
-        elif self.window.select_thread == "process_embedded":
-
-            if self.window.input_line.text() == "" and not self.window.check_last_20.isChecked():
+            if self.window.input_line.text() == "" and not self.window.check_latest.isChecked():
                 self.signal_infobox.emit('Missing input', 'No input numbers to proceed. Please try again.')
-            elif self.window.check_last_20.isChecked():
+            elif self.window.check_latest.isChecked():
 
-                ldb = LotteryDatabase(config['database'])
-                ldb_original = 'INPUT_' + config['games']['mini_lotto']['database']
+                ldb = LotteryDatabase()
+                ldb_original = 'INPUT_' + CONFIG['games']['mini_lotto']['database']
                 original_len = ldb.db_get_length(ldb_original)
 
                 for i in range(1, 32):
@@ -501,17 +548,13 @@ class ThreadClass(QtCore.QThread):
 
                             self.window.combo_db.setCurrentIndex(j)
 
-                            for m in range(self.window.combo_predict_ml.count()):
+                            self.table_name = 'MODEL_' + self.window.combo_db.currentText()
+                            self.currentThread().__name__ = "MainThread"
+                            ml = MachineLearning(self)
+                            _ = ml.embedded_learning(" ".join(map(str, fetch_one[1:6])), i, fetch_one[0])
 
-                                self.window.combo_predict_ml.setCurrentIndex(m)
-
-                                self.table_name = 'MODEL_' + self.window.combo_db.currentText()
-                                self.currentThread().__name__ = "MainThread"
-                                ml = MachineLearning(self)
-                                output = ml.embedded_learning(" ".join(map(str, fetch_one[1:6])), i, fetch_one[0])
-
-                    except Exception as e:
-                        self.signal_infobox.emit('Error', 'Something went wrong!! \n' + str(e))
+                    except Exception as exc:
+                        self.signal_infobox.emit('Error', 'Something went wrong!! \n' + str(exc))
 
                 self.signal_infobox.emit('Done', 'Finished!!')
 
@@ -524,57 +567,108 @@ class ThreadClass(QtCore.QThread):
                 try:
                     output = ml.embedded_learning(self.window.input_line.text())
                     self.signal_infobox.emit('Completed', 'Embedded Training finished! \n' + output)
-                except Exception as e:
-                    self.signal_infobox.emit('Error', 'Something went wrong!! \n' + str(e))
+                except Exception as exc:
+                    self.signal_infobox.emit('Error', 'Something went wrong!! \n' + str(exc))
 
-        elif self.window.select_thread == "machine_learning":
+        elif process_name == "sklearn_ml":
+
+            if len(self.window.list_ml.selectedItems()) > 0:
+                self.table_name = 'MODEL_' + self.window.combo_db.currentText()
+                self.currentThread().__name__ = "MainThread"
+                ml = MachineLearning(self)
+
+                try:
+                    ml.sklearn_model_train()
+                    self.signal_infobox.emit('Completed', 'Training model finished!')
+                except Exception as exc:
+                    self.signal_infobox.emit('Error', 'Something went wrong!! \n' + str(exc))
+            else:
+                self.signal_infobox.emit('Missing', 'Algorithm has not been selected!')
+
+        elif process_name == "keras_ml":
 
             self.table_name = 'MODEL_' + self.window.combo_db.currentText()
             self.currentThread().__name__ = "MainThread"
             ml = MachineLearning(self)
 
             try:
-                ml.random_forest_train()
+                ml.keras_model_train()
                 self.signal_infobox.emit('Completed', 'Training model finished!')
-            except Exception as e:
-                self.signal_infobox.emit('Error', 'Something went wrong!! \n' + str(e))
+            except Exception as exc:
+                self.signal_infobox.emit('Error', 'Something went wrong!! \n' + str(exc))
+                print(traceback.format_exc())
 
-        elif self.window.select_thread == "export_to_csv":
+        elif process_name == "export_to_csv":
 
-            self.table_name = 'EMPTY'
-            export_to = ConvertMain(self)
+            export_to = ConvertMain(self, False)
 
             try:
                 export_to.convert_to_original()
                 self.signal_progress_bar.emit(0)
                 self.signal_infobox.emit('Completed', 'Export complete!')
-            except Exception as e:
-                self.signal_infobox.emit('Error', 'Something went wrong!! \n' + str(e))
+            except Exception as exc:
+                self.signal_infobox.emit('Error', 'Something went wrong!! \n' + str(exc))
                 self.signal_progress_bar.emit(0)
 
-        elif self.window.select_thread == "import_data":
+        elif process_name == "import_data":
 
             options = QFileDialog.Options()
             options |= QFileDialog.DontUseNativeDialog
             file_name, _ = QFileDialog.getOpenFileName(self.window, "Import file", "",
                                                        "All Files (*);;Text Files (*.txt)", options=options)
             if file_name:
-                curr_game = config['games']['mini_lotto']['features']['original_numbers']
-                thread_ldb = LotteryDatabase(config['database'])
-                table_name = 'INPUT_' + config['games']['mini_lotto']['database']
-                table = ",".join(['ID INTEGER PRIMARY KEY'] +
-                                 ['NR' + str(n) + ' INTEGER' for n in range(1, curr_game['length'] + 1)])
 
-                thread_ldb.db_create_table(table_name, table)
-                imported, rejected = thread_ldb.db_import_file(table_name, file_name, curr_game['length'] + 1)
+                ldb = LotteryDatabase()
+                curr_game = ldb.db_fetchone(LottoGame, {'game_name': self.window.line_current_game.text()})
+
+                table_name = 'INPUT_' + curr_game.game_table
+                table_columns = [Column('id', Integer, primary_key=True)]
+                table_columns += [Column('NR_' + str(n), Integer) for n in range(1, curr_game.game_len + 1)]
+
+                ldb.db_create_table(table_name, table_columns)
+                imported, rejected = ldb.db_import_file(table_name, file_name, curr_game.game_len + 1)
 
                 self.signal_infobox.emit('Completed', str.format(
-                    'Lottery data imported! \n Imported: {} \n Rejected: {}', imported, rejected))
+                    'Lottery data imported! \n '
+                    'Imported: {} \n '
+                    'Rejected: {}',
+                    imported, rejected))
+
+
+class OutLog:
+
+    def __init__(self, edit, out=None, color=None):
+        """(edit, out=None, color=None) -> can write stdout, stderr to a
+        QTextEdit.
+        edit = QTextEdit
+        out = alternate stream ( can be the original sys.stdout )
+        color = alternate color (i.e. color stderr a different color)
+        """
+        self.edit = edit
+        self.out = out
+        self.color = color
+
+    def write(self, m):
+
+        tc = None
+        if self.color:
+            tc = self.edit.textColor()
+            self.edit.setTextColor(self.color)
+
+        # self.edit.moveCursor(QtGui.QTextCursor.End)
+        self.edit.insertPlainText(m)
+
+        if self.color:
+            self.edit.setTextColor(tc)
+
+        # if self.out:
+        #     self.out.write(m)
 
 
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    # noinspection PyDeprecation
     app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
     window = Window()
     window.show()

@@ -1,27 +1,29 @@
-import pandas as pd
-import numpy as np
-from config import config
-from hyperopt import STATUS_OK, Trials, tpe, hp, fmin
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score
-from sklearn.metrics import roc_curve, auc, confusion_matrix
-from sklearn import model_selection, linear_model
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
-from imblearn.under_sampling import RandomUnderSampler
-from imblearn.pipeline import make_pipeline
-from db_analysis import LotteryDatabase
-import math
-from itertools import combinations
-from sklearn.externals import joblib
-from PyQt5.QtWidgets import QMessageBox
-import matplotlib.pyplot as plt
-from collections import Counter
-from matplotlib.legend_handler import HandlerLine2D
-from convert import ConvertMain
-from heapq import nlargest, nsmallest
-import datetime
-import csv
 import os
+import csv
+import math
+import datetime
+from collections import Counter
+from heapq import nlargest, nsmallest
+from itertools import combinations
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.legend_handler import HandlerLine2D
+import keras.backend.tensorflow_backend as tb
+from keras.models import Sequential
+from keras.layers.core import Dense, Dropout, Activation
+from keras.optimizers import Adadelta, Adam, rmsprop
+from imblearn.pipeline import make_pipeline
+from imblearn.under_sampling import RandomUnderSampler
+from hyperopt import STATUS_OK, Trials, tpe, hp, fmin
+from sklearn import model_selection, linear_model
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score, roc_curve, auc, confusion_matrix
+
+from games_config import CONFIG
+from convert import ConvertMain
+from db_manage import LotteryDatabase
 
 
 class MachineLearning:
@@ -29,17 +31,23 @@ class MachineLearning:
     def __init__(self, worker):
 
         self.worker = worker
-        self.ldb = LotteryDatabase(config['database'])
+        self.ldb = LotteryDatabase()
 
         # variables
         self.x = None
         self.y = None
-        self.N_FOLDS = 10
-        self.MAX_EVALS = 10
+
+        self.x_train = None
+        self.x_validation = None
+        self.y_train = None
+        self.y_validation = None
+
+        self.N_FOLDS = 5
+        self.MAX_EVALS = 20
         self.RANDOM_STATE = 42
         self.training_size = 15
         self.n_increment = 10
-        self.curr_game = config['games']['mini_lotto']
+        self.curr_game = CONFIG['games']['mini_lotto']
 
         # features
         self.table_headers = []
@@ -84,10 +92,11 @@ class MachineLearning:
         dataset = pd.concat(self.generate_df_pieces(self.ldb.conn, 100000, 0, original_len-limit))
         array = dataset.values
 
-        x = array[:, 1:len(self.table_headers)+1]
-        y = array[:, len(self.table_headers)+1]
+        self.x = array[:, 1:len(self.table_headers)+1]
+        self.y = array[:, len(self.table_headers)+1]
 
-        model, info = self.choose_model()
+        tb._SYMBOLIC_SCOPE.value = True
+        model = self.choose_model(keras=True)
 
         self.worker.table_name = 'PREDICT_' + self.worker.window.combo_predict_model.currentText()
 
@@ -104,7 +113,7 @@ class MachineLearning:
 
         now = datetime.datetime.now()
         file_name_r = str.format('{} {}', self.worker.window.combo_predict_model.currentText(),
-                               now.strftime("%Y-%m-%d %H %M %S")) + info
+                               now.strftime("%Y-%m-%d %H %M %S")) + model['info']
 
         export_columns = ['DRAFT_NR', 'FIRST', 'SECOND', 'THIRD', 'FOURTH', 'FIFTH', 'ODD_EVEN', 'LOW_HIGH', 'LA_JOLLA',
                           'SCORE_ALL', 'SCORE_TOP', 'SCORE_LESS', 'SCORE_2', 'SCORE_3', 'LABEL'] + \
@@ -196,12 +205,11 @@ class MachineLearning:
 
             self.worker.signal_status.emit('')
 
-        if self.worker.window.combo_predict_ml.currentText() == 'LogisticRegression' or \
-                self.worker.window.combo_predict_ml.currentText() == 'SGDClassifier':
+        if self.worker.window.check_keras.isChecked():
 
-            model.fit(x, y)
+            model['model'].fit(self.x, self.y, nb_epoch=100, batch_size=212, verbose=2)
 
-            prediction = model.predict(output_x)
+            prediction = model['model'].predict(output_x)
 
             combined_set = list(map(str, prediction))
 
@@ -212,7 +220,35 @@ class MachineLearning:
 
                 now = datetime.datetime.now()
                 file_name_w = str.format('{} {}', self.worker.window.combo_predict_model.currentText(),
-                                         now.strftime("%Y-%m-%d %H %M %S")) + info
+                                         now.strftime("%Y-%m-%d %H %M %S")) + model['info']
+
+                with open('archived/' + file_name_w + '.csv', 'w', newline='') as csv_file:
+                    writer = csv.writer(csv_file)
+                    writer.writerow(export_columns)
+
+                    for row, o in zip(csv_input, combined_set):
+                        writer.writerow(row + [o])
+
+            os.remove('archived/' + file_name_r + '.csv')
+            file_name_r = file_name_w
+
+        elif self.worker.window.combo_predict_ml.currentText() == 'LogisticRegression' or \
+                self.worker.window.combo_predict_ml.currentText() == 'SGDClassifier':
+
+            model['model'].fit(self.x, self.y)
+
+            prediction = model['model'].predict(output_x)
+
+            combined_set = list(map(str, prediction))
+
+            with open('archived/' + file_name_r + '.csv', 'r') as read_csv_file:
+
+                csv_input = csv.reader(read_csv_file)
+                next(csv_input)
+
+                now = datetime.datetime.now()
+                file_name_w = str.format('{} {}', self.worker.window.combo_predict_model.currentText(),
+                                         now.strftime("%Y-%m-%d %H %M %S")) + model['info']
 
                 with open('archived/' + file_name_w + '.csv', 'w', newline='') as csv_file:
                     writer = csv.writer(csv_file)
@@ -228,10 +264,10 @@ class MachineLearning:
 
             for t in range(self.training_size):
                 self.worker.signal_status.emit(str.format('Training in process... {} of {}', t + 1, self.training_size))
-                model.n_estimators += self.n_increment
-                model.fit(x, y)
+                model['model'].n_estimators += self.n_increment
+                model['model'].fit(self.x, self.y)
 
-                prediction = model.predict(output_x)
+                prediction = model['model'].predict(output_x)
 
                 combined_set = list(map(str, prediction))
 
@@ -242,7 +278,7 @@ class MachineLearning:
 
                     now = datetime.datetime.now()
                     file_name_w = str.format('{} {}', self.worker.window.combo_predict_model.currentText(),
-                                             now.strftime("%Y-%m-%d %H %M %S")) + info
+                                             now.strftime("%Y-%m-%d %H %M %S")) + model['info']
 
                     with open('archived/' + file_name_w + '.csv', 'w', newline='') as csv_file:
 
@@ -267,41 +303,114 @@ class MachineLearning:
 
         return msg
 
-    def choose_model(self):
+    def choose_model(self, params=None, fresh=False, keras=False):
 
-        model, info = '', ''
+        model, info = None, None
 
-        if self.worker.window.combo_predict_ml.currentText() == 'RandomForestClassifier':
+        if keras:
 
-            model = RandomForestClassifier(warm_start=True, n_estimators=1, n_jobs=-1, random_state=self.RANDOM_STATE)
+            model = Sequential()
+            model.add(Dense(output_dim=220, kernel_initializer='uniform', input_dim=int(self.x.shape[1])))
+            model.add(Activation(activation='relu'))
+            model.add(Dropout(0.27208339620963506))
+
+            model.add(Dense(output_dim=205, kernel_initializer="glorot_uniform"))
+            model.add(Activation(activation='relu'))
+            model.add(Dropout(0.29152160619480066))
+
+            model.add(Dense(1))
+            model.add(Activation('sigmoid'))
+            model.compile(loss='binary_crossentropy', optimizer='rmsprop')
+
+        elif self.worker.window.list_ml.currentItem().text() == 'RandomForestClassifier':
+
+            if params is not None:
+                model = RandomForestClassifier(**params)
+            elif fresh:
+                model = RandomForestClassifier()
+            else:
+                model = RandomForestClassifier(warm_start=True, n_estimators=1, n_jobs=-1,
+                                               random_state=self.RANDOM_STATE)
+
+            # model = RandomForestClassifier(warm_start=True, n_estimators=1, n_jobs=-1, random_state=self.RANDOM_STATE)
             info = ' RFC ' + self.worker.window.combo_db.currentText()
 
-        elif self.worker.window.combo_predict_ml.currentText() == 'RandomForestRegressor':
+        elif self.worker.window.list_ml.currentItem().text() == 'RandomForestRegressor':
 
-            model = RandomForestRegressor(warm_start=True, n_estimators=1, n_jobs=-1, random_state=self.RANDOM_STATE)
+            if params is not None:
+                model = RandomForestRegressor(**params)
+            elif fresh:
+                model = RandomForestRegressor()
+            else:
+                model = RandomForestRegressor(warm_start=True, n_estimators=1, n_jobs=-1,
+                                              random_state=self.RANDOM_STATE)
+
             info = ' RFR ' + self.worker.window.combo_db.currentText()
 
-        elif self.worker.window.combo_predict_ml.currentText() == 'LogisticRegression':
+        elif self.worker.window.list_ml.currentItem().text() == 'LogisticRegression':
 
-            model = linear_model.LogisticRegression(C=50, solver='liblinear')
+            if params is not None:
+                model = linear_model.LogisticRegression(**params)
+            elif fresh:
+                model = linear_model.LogisticRegression()
+            else:
+                model = linear_model.LogisticRegression(C=50, solver='liblinear')
             info = ' LR ' + self.worker.window.combo_db.currentText()
 
-        elif self.worker.window.combo_predict_ml.currentText() == 'SGDClassifier':
+        elif self.worker.window.list_ml.currentItem().text() == 'SGDClassifier':
 
-            model = linear_model.SGDClassifier(class_weight='balanced', loss='hinge', max_iter=2426,
+            if params is not None:
+                model = linear_model.SGDClassifier(**params)
+            elif fresh:
+                model = linear_model.SGDClassifier()
+            else:
+                model = linear_model.SGDClassifier(class_weight='balanced', loss='hinge', max_iter=2426,
                                                tol=1.6246894453989777e-05, warm_start=True)
             # model = linear_model.SGDClassifier(class_weight='balanced', loss='log', max_iter=2330, tol=7.289319599768096e-05)
             # model = linear_model.SGDClassifier(max_iter=1486, tol=4.663673194605843e-05, loss='log', fit_intercept=False)
             # model = linear_model.SGDClassifier(max_iter=840, tol=15.8197115265907305e-05, class_weight='balanced', loss='modified_huber')
             info = ' SGD ' + self.worker.window.combo_db.currentText()
 
-        return model, info
+        return {'model': model, 'info': info}
 
-    def choose_space(self):
+    def choose_space(self, keras=False):
 
         space = {}
 
-        if self.worker.window.combo_predict_ml.currentText() == 'RandomForestClassifier':
+        if keras:
+
+            space = {'choice': hp.choice('num_layers',
+                                         [{'layers': 'two', },
+                                          {'layers': 'three',
+                                           'units3': hp.uniform('units3', 64, 1024),
+                                           'dropout3': hp.uniform('dropout3', .25, .75)}
+                                          ]),
+
+                     'units1': hp.uniform('units1', 64, 1024),
+                     'units2': hp.uniform('units2', 64, 1024),
+
+                     'dropout1': hp.uniform('dropout1', .25, .75),
+                     'dropout2': hp.uniform('dropout2', .25, .75),
+
+                     'batch_size': hp.uniform('batch_size', 28, 128),
+
+                     'nb_epochs': 100,
+                     'optimizer': hp.choice('optimizer', ['adadelta', 'adam', 'rmsprop']),
+                     'activation': 'relu'
+                     }
+
+        elif self.worker.window.list_ml.currentItem().text() == 'RandomForestClassifier':
+
+            space = {
+                'n_estimators': hp.choice('n_estimators', range(100, 1500)),
+                'class_weight': hp.choice('class_weight', ['balanced', 'balanced_subsample', None]),
+                'max_features': hp.choice('max_features', ['auto', 'sqrt', 'log2']),
+                'bootstrap': hp.choice('bootstrap', [True, False]),
+                'max_depth': hp.choice('max_depth', [None, 1, 3]),
+                'criterion': hp.choice('criterion', ['gini', 'entropy'])
+            }
+
+        elif self.worker.window.list_ml.currentItem().text() == 'RandomForestRegressor':
 
             space = {
                 'n_estimators': hp.choice('n_estimators', range(10, 150)),
@@ -314,24 +423,19 @@ class MachineLearning:
                 'min_samples_leaf': hp.choice('min_samples_leaf', [1, 2])
             }
 
-        elif self.worker.window.combo_predict_ml.currentText() == 'RandomForestRegressor':
+        elif self.worker.window.list_ml.currentItem().text() == 'LogisticRegression':
 
             space = {
-                'n_estimators': hp.choice('n_estimators', range(10, 150)),
+                'solver': hp.choice('solver', ['newton-cg', 'lbfgs', 'sag']),
                 'warm_start': hp.choice('warm_start', [True, False]),
-                'class_weight': hp.choice('class_weight', ['balanced', 'balanced_subsample', None]),
-                'max_features': hp.choice('max_features', ['auto', 'sqrt']),
-                'bootstrap': hp.choice('bootstrap', [True, False]),
-                'max_depth': hp.choice('max_depth', [None, 1, 2, 3]),
-                'min_samples_split': hp.choice('min_samples_split', [2, 3]),
-                'min_samples_leaf': hp.choice('min_samples_leaf', [1, 2])
+                'class_weight': hp.choice('class_weight', ['balanced', None]),
+                'tol': hp.uniform('tol', 0.00001, 0.0001),
+                'C': hp.uniform('C', 1.0, 50.0),
+                'fit_intercept': hp.choice('fit_intercept', [True, False]),
+                'max_iter': hp.choice('max_iter', range(100, 3000))
             }
 
-        elif self.worker.window.combo_predict_ml.currentText() == 'LogisticRegression':
-
-            pass
-
-        elif self.worker.window.combo_predict_ml.currentText() == 'SGDClassifier':
+        elif self.worker.window.list_ml.currentItem().text() == 'SGDClassifier':
 
             space = {
                 'class_weight': hp.choice('class_weight', [None, 'balanced']),
@@ -339,12 +443,14 @@ class MachineLearning:
                 'fit_intercept': hp.choice('fit_intercept', [True, False]),
                 'tol': hp.uniform('tol', 0.00001, 0.0001),
                 'loss': hp.choice('loss', ['hinge', 'log', 'squared_hinge', 'modified_huber']),
-                'max_iter': hp.choice('max_iter', range(1000, 2500))
+                'max_iter': hp.choice('max_iter', range(500, 3000))
             }
 
         return space
 
-    def random_forest_train(self):
+    def sklearn_model_train(self):
+
+        print(self.worker.window.list_ml.currentItem().text())
 
         dataset = pd.concat(self.generate_df_pieces(self.ldb.conn, 100000, offset=0, ids=5000))
         array = dataset.values
@@ -355,44 +461,128 @@ class MachineLearning:
         x_train, x_validation, y_train, y_validation = model_selection.train_test_split(self.x, self.y, test_size=0.2,
                                                                                         random_state=self.RANDOM_STATE)
 
-        model, info = self.choose_model()
         space = self.choose_space()
 
         bayes_trials = Trials()
 
-        _ = fmin(fn=self.objective, space=space, algo=tpe.suggest, max_evals=self.MAX_EVALS, trials=bayes_trials)
+        best = fmin(fn=self.sklearn_objective, space=space, algo=tpe.suggest, max_evals=self.MAX_EVALS, trials=bayes_trials)
+
+        print(best)
 
         for bt in bayes_trials:
-            print(bt)
+            print(bt['result']['loss'])
+            print(bt['result']['params'])
 
-        model.fit(x_train, y_train)
-        y_pred = model.predict(x_validation)
-        f1_score(y_pred, y_validation)
+        model = self.choose_model(space_eval(space, best))
+        model['model'].fit(x_train, y_train)
+        y_pred = model['model'].predict(x_validation)
 
         msg = 'Accuracy Score : ' + str(accuracy_score(y_validation, y_pred)) + '\n' + \
               'Precision Score : ' + str(precision_score(y_validation, y_pred)) + '\n' + \
               'Recall Score : ' + str(recall_score(y_validation, y_pred)) + '\n' + \
               'F1 Score : ' + str(f1_score(y_validation, y_pred)) + '\n' + \
-              'Confusion Matrix : \n' + str(confusion_matrix(y_validation, y_pred))
+              'ROC_AUC Score:' + str(roc_auc_score(y_validation, y_pred))
+
+        # 'Confusion Matrix : \n' + str(confusion_matrix(y_validation, y_pred))
+
+        plt.figure()
+        self.plot_confusion_matrix(confusion_matrix(y_validation, y_pred), classes=[1, 0])
 
         self.worker.signal_status.emit('')
 
         self.worker.signal_infobox.emit("Completed", msg)
+        plt.show()
 
-    def objective(self, params, n_folds=5):
+    def sklearn_objective(self, params, n_folds=5):
 
-        clf = linear_model.SGDClassifier()
+        clf = self.choose_model(fresh=True)
+
         rus = RandomUnderSampler()
 
-        pipeline = make_pipeline(rus, clf)
+        # pipeline = make_pipeline(rus, clf)
 
-        scores = model_selection.cross_val_score(pipeline, self.x, self.y, cv=n_folds, scoring='roc_auc')
+        scores = model_selection.cross_val_score(clf['model'], self.x, self.y, cv=n_folds, scoring='f1_macro')
 
         best_score = max(scores)
 
         loss = 1 - best_score
 
         return {'loss': loss, 'params': params, 'status': STATUS_OK}
+
+    def keras_model_train(self):
+
+        dataset = pd.concat(self.generate_df_pieces(self.ldb.conn, 100000, offset=0, ids=5000))
+        array = dataset.values
+
+        self.x = array[:, :len(self.table_headers)]
+        self.y = array[:, len(self.table_headers)]
+
+        self.x_train, self.x_validation, self.y_train, self.y_validation = model_selection.train_test_split(
+            self.x, self.y, test_size=0.2, random_state=self.RANDOM_STATE)
+
+        space = self.choose_space(keras=True)
+
+        tb._SYMBOLIC_SCOPE.value = True
+
+        bayes_trials = Trials()
+
+        best = fmin(fn=self.keras_objective, space=space, algo=tpe.suggest, max_evals=self.MAX_EVALS, trials=bayes_trials)
+
+        print(best)
+
+        for bt in bayes_trials:
+            print(bt['result']['loss'])
+            print(bt['result']['params'])
+
+    def keras_objective(self, params):
+
+        model = Sequential()
+        model.add(Dense(output_dim=params['units1'], input_dim=self.x_train.shape[1]))
+        model.add(Activation(params['activation']))
+        model.add(Dropout(params['dropout1']))
+
+        model.add(Dense(output_dim=params['units2'], init="glorot_uniform"))
+        model.add(Activation(params['activation']))
+        model.add(Dropout(params['dropout2']))
+
+        if params['choice']['layers'] == 'three':
+            model.add(Dense(output_dim=params['choice']['units3'], init="glorot_uniform"))
+            model.add(Activation(params['activation']))
+            model.add(Dropout(params['choice']['dropout3']))
+
+        model.add(Dense(1))
+        model.add(Activation('sigmoid'))
+        model.compile(loss='binary_crossentropy', optimizer=params['optimizer'])
+
+        model.fit(self.x_train, self.y_train, nb_epoch=params['nb_epochs'], batch_size=params['batch_size'], verbose=0)
+
+        pred_auc = model.predict_proba(self.x_validation, batch_size=128, verbose=0)
+        acc = roc_auc_score(self.y_validation, pred_auc)
+        # print('AUC:', acc)
+        # sys.stdout.flush()
+
+        return {'loss': -acc, 'params': params}
+
+    @staticmethod
+    def plot_confusion_matrix(cm, classes, normalize=False, cmap=plt.cm.Blues):
+
+        plt.imshow(cm, interpolation='nearest', cmap=cmap)
+        plt.title('Confusion matrix')
+        plt.colorbar()
+        tick_marks = np.arange(len(classes))
+        plt.xticks(tick_marks, classes, rotation=45)
+        plt.yticks(tick_marks, classes)
+
+        fmt = '.2f' if normalize else 'd'
+        thresh = cm.max() / 2.
+        for i, j in product(range(cm.shape[0]), range(cm.shape[1])):
+            plt.text(j, i, format(cm[i, j], fmt),
+                     horizontalalignment="center",
+                     color="white" if cm[i, j] > thresh else "black")
+
+        plt.ylabel('True label')
+        plt.xlabel('Predicted label')
+        plt.tight_layout()
 
     def validate_estimators(self, x, y):
 
@@ -576,13 +766,13 @@ class MachineLearning:
         x = array[:, :len(self.table_headers)]
 
         filename = 'random_forest.sav'
-        loaded_model = joblib.load(filename)
-        prediction = loaded_model.predict(x)
+        # loaded_model = joblib.load(filename)
+        # prediction = loaded_model.predict(x)
 
-        combined_set = list(map(str, prediction))
+        # combined_set = list(map(str, prediction))
 
-        for each in combined_set:
-            self.ldb.db_insert('OUTPUT_prediction', [ids] + [int(each)])
-            ids += 1
-
-        self.ldb.db_commit()
+        # for each in combined_set:
+        #     self.ldb.db_insert('OUTPUT_prediction', [ids] + [int(each)])
+        #     ids += 1
+        #
+        # self.ldb.db_commit()
