@@ -22,7 +22,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score, roc_curve, auc, confusion_matrix
 
 from games_config import CONFIG
-from convert import ConvertMain
+from convert import ConvertModel
 from db_manage import LotteryDatabase
 
 
@@ -61,12 +61,12 @@ class MachineLearning:
 
     def generate_df_pieces(self, connection, chunk_size, offset, ids):
 
-        last_row = self.ldb.db_get_length(self.table_name)
+        last_row = self.ldb.get_table_length(self.table_name)
         chunks = int(math.ceil(last_row / chunk_size))
         n_chunk = 1
 
-        self.ldb.db_delete_view('tempView')
-        self.ldb.db_create_view('tempView', ",".join(['DRAFT_ID'] + self.table_headers + ['LABEL']), self.table_name)
+        self.ldb.delete_view('tempView')
+        self.ldb.create_view('tempView', ",".join(['DRAFT_ID'] + self.table_headers + ['LABEL']), self.table_name)
 
         while True:
             self.worker.signal_status.emit(str.format('Collecting data from database... {} of {}', n_chunk, chunks))
@@ -87,7 +87,7 @@ class MachineLearning:
 
     def embedded_learning(self, input_array, limit=0, draft_id=0):
 
-        original_len = self.ldb.db_get_length('INPUT_' + self.curr_game['database'])
+        original_len = self.ldb.get_table_length('INPUT_' + self.curr_game['database'])
 
         dataset = pd.concat(self.generate_df_pieces(self.ldb.conn, 100000, 0, original_len-limit))
         array = dataset.values
@@ -100,7 +100,7 @@ class MachineLearning:
 
         self.worker.table_name = 'PREDICT_' + self.worker.window.combo_predict_model.currentText()
 
-        convert = ConvertMain(self.worker, list(map(int, input_array.split(" "))), limit)
+        convert = ConvertModel(self.worker, list(map(int, input_array.split(" "))), limit)
         convert.create_prediction_model(input_array)
 
         self.table_name = 'PREDICT_' + self.worker.window.combo_predict_model.currentText()
@@ -109,7 +109,7 @@ class MachineLearning:
         output_array = output_dataset.values
         output_x = output_array[:, 1:len(self.table_headers)+1]
 
-        original_len = self.ldb.db_get_length(self.worker.table_name) + 1
+        original_len = self.ldb.get_table_length(self.worker.table_name) + 1
 
         now = datetime.datetime.now()
         file_name_r = str.format('{} {}', self.worker.window.combo_predict_model.currentText(),
@@ -142,7 +142,7 @@ class MachineLearning:
             la_jolla_db = self.ldb.c.fetchall()
 
             for o in range(1, original_len):
-                fetch_one = list(self.ldb.db_fetchone(self.table_name, o))
+                fetch_one = list(self.ldb.fetchone(self.table_name, o))
 
                 originals = fetch_one[2:self.curr_game['length'] + 2]
                 label_column = [fetch_one[-1]]
@@ -754,8 +754,8 @@ class MachineLearning:
 
         output_headers = ",".join(['ID INTEGER PRIMARY KEY'] + ['OUTPUT_LABEL INTEGER'])
 
-        self.ldb.db_delete_table('OUTPUT_prediction')
-        self.ldb.db_create_table('OUTPUT_prediction', output_headers)
+        self.ldb.delete_table('OUTPUT_prediction')
+        self.ldb.create_table('OUTPUT_prediction', output_headers)
 
         ids = 1
 

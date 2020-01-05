@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog
 
 from db_models import *
 from games_config import *
-from convert import ConvertMain
+from convert import ConvertModel
 from db_manage import LotteryDatabase
 from machine_learning import MachineLearning
 
@@ -85,14 +85,14 @@ class Window(QtBaseClass, Ui_MainWindow):
 
                        'list_model': list_model}
 
-        self.ldb.db_update(UserSettings,
-                           {'user_parent': 'default',
+        self.ldb.update_record(UserSettings,
+                               {'user_parent': 'default',
                             'line_current_game': self.line_current_game.text()},
-                           user_config)
+                               user_config)
 
     def get_user_settings(self):
 
-        user_config = self.ldb.db_fetchone(UserSettings, {'user_parent': 'default',
+        user_config = self.ldb.fetchone(UserSettings, {'user_parent': 'default',
                                                           'line_current_game': self.line_current_game.text()})
 
         self.check_win_loss.setChecked(user_config.check_win_loss)
@@ -139,7 +139,7 @@ class Window(QtBaseClass, Ui_MainWindow):
 
     def update_combobox_ml(self):
 
-        tables = self.ldb.db_fetchall(DatabaseModels, {})
+        tables = self.ldb.fetchall(DatabaseModels, {})
 
         self.combo_predict_model.clear()
         self.combo_db.clear()
@@ -312,9 +312,9 @@ class ModelAddDialog(QtBaseAddClass, Ui_AddDialog):
             self.list_feature_order.item(current_row + 1).setSelected(True)
 
     def list_add_available_init(self):
-        features = self.ldb.db_fetchall(ModelFeatures, {'game': self.window.line_current_game.text()})
+        features = self.ldb.fetchall(ModelFeatures, {'game': self.window.line_current_game.text()})
         for feature in features:
-            self.list_add_available.addItem(feature.feature_name)
+            self.list_add_available.addItem(feature.name)
 
     def add_feature(self):
 
@@ -362,7 +362,7 @@ class DatabaseManagerDialog(QtBaseDbClass, Ui_DbDialog):
 
     def db_manager_init(self):
 
-        models = self.ldb.db_fetchall(DatabaseModels, {})
+        models = self.ldb.fetchall(DatabaseModels, {})
 
         for model in models:
             if model.database_name.startswith('MODEL_'):
@@ -423,16 +423,16 @@ class DatabaseManagerDialog(QtBaseDbClass, Ui_DbDialog):
 
         for key, value in self.deleted.items():
             if value == 0:
-                self.ldb.db_delete_record(DatabaseModels, {'database_name': 'MODEL_' + key})
+                self.ldb.delete_record(DatabaseModels, {'database_name': 'MODEL_' + key})
             elif value == 1:
-                self.ldb.db_delete_record(DatabaseModels, {'database_name': 'PREDICT_' + key})
+                self.ldb.delete_record(DatabaseModels, {'database_name': 'PREDICT_' + key})
 
         for key, value in self.created.items():
             if value == 0:
-                self.ldb.db_add_record(DatabaseModels, {'database_name': 'MODEL_' + key})
+                self.ldb.add_record(DatabaseModels, {'database_name': 'MODEL_' + key})
                 self.window.combo_db.addItem(key)
             elif value == 1:
-                self.ldb.db_add_record(DatabaseModels, {'database_name': 'PREDICT_' + key})
+                self.ldb.add_record(DatabaseModels, {'database_name': 'PREDICT_' + key})
                 self.window.combo_predict_model.addItem(key)
 
         self.close_db_manager()
@@ -465,7 +465,7 @@ class ThreadClass(QtCore.QThread):
                 self.table_name = 'PREDICT_' + self.window.combo_predict_model.currentText()
 
                 try:
-                    convert = ConvertMain(self)
+                    convert = ConvertModel(self)
                     ml = MachineLearning(self)
 
                     convert.create_prediction_model(self.window.input_line.text())
@@ -480,7 +480,7 @@ class ThreadClass(QtCore.QThread):
 
             try:
                 ldb = LotteryDatabase()
-                imported, rejected = ldb.db_import_la_jolla()
+                imported, rejected = ldb.import_la_jolla()
                 self.signal_infobox.emit('Completed', str.format(
                     'Lottery data imported! \n Imported: {} \n Rejected: {}', imported, rejected))
 
@@ -503,7 +503,7 @@ class ThreadClass(QtCore.QThread):
                     self.window.response = None
 
                     try:
-                        convert = ConvertMain(self)
+                        convert = ConvertModel(self)
 
                         if self.window.check_win_loss.isChecked():
 
@@ -536,13 +536,13 @@ class ThreadClass(QtCore.QThread):
 
                 ldb = LotteryDatabase()
                 ldb_original = 'INPUT_' + CONFIG['games']['mini_lotto']['database']
-                original_len = ldb.db_get_length(ldb_original)
+                original_len = ldb.get_table_length(ldb_original)
 
                 for i in range(1, 32):
 
                     try:
 
-                        fetch_one = list(ldb.db_fetchone(ldb_original, original_len - i+1))
+                        fetch_one = list(ldb.fetchone(ldb_original, original_len - i + 1))
 
                         for j in range(self.window.combo_db.count()):
 
@@ -600,7 +600,7 @@ class ThreadClass(QtCore.QThread):
 
         elif process_name == "export_to_csv":
 
-            export_to = ConvertMain(self, False)
+            export_to = ConvertModel(self, False)
 
             try:
                 export_to.convert_to_original()
@@ -619,14 +619,21 @@ class ThreadClass(QtCore.QThread):
             if file_name:
 
                 ldb = LotteryDatabase()
-                curr_game = ldb.db_fetchone(LottoGame, {'game_name': self.window.line_current_game.text()})
+                curr_game = ldb.fetchone(LottoGame, {'name': self.window.line_current_game.text()})
 
-                table_name = 'INPUT_' + curr_game.game_table
-                table_columns = [Column('id', Integer, primary_key=True)]
-                table_columns += [Column('NR_' + str(n), Integer) for n in range(1, curr_game.game_len + 1)]
+                if not ldb.check_model_exist_by_table_name('INPUT_' + curr_game.input_table):
+                    # ldb.delete_table('INPUT_' + curr_game.game_table)
+                    # ldb.delete_model(curr_game.input_model)
 
-                ldb.db_create_table(table_name, table_columns)
-                imported, rejected = ldb.db_import_file(table_name, file_name, curr_game.game_len + 1)
+                    input_params = {'__tablename__': 'INPUT_' + curr_game.input_table,
+                                    'id': Column('id', Integer, primary_key=True)}
+
+                    for i in range(1, curr_game.length + 1):
+                        input_params['NR_' + str(i)] = Column('NR_' + str(i), Integer)
+                    ldb.create_class_model(curr_game.input_model, input_params)
+                    ldb.meta_create_all()
+
+                imported, rejected = ldb.import_file(curr_game.input_model, file_name, curr_game.game_len + 1)
 
                 self.signal_infobox.emit('Completed', str.format(
                     'Lottery data imported! \n '

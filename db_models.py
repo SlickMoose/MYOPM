@@ -41,21 +41,24 @@ class LottoGame(BASE):
 
     __tablename__ = 'lotto_games'
 
-    game_name = Column('game_name', String(50), primary_key=True)
-    game_table = Column('game_table', String(50), unique=True)
+    name = Column('name', String(50), primary_key=True)
+    input_table = Column('input_table', String(50), unique=True)
+    input_model = Column('input_model', String(50), unique=True)
+    training_model = Column('training_model', String(50), unique=True)
+    predict_model = Column('predict_model', String(50), unique=True)
     total_numbers = Column('total_numbers', Integer)
-    game_len = Column('game_len', Integer)
+    length = Column('length', Integer)
 
-    number_groups = relationship('NumberGroups', cascade="all,delete")
-    alphabetic_groups = relationship('AlphabeticGroups', cascade="all,delete")
-    model_features = relationship('ModelFeatures', cascade="all,delete")
+    number_groups = relationship('NumberGroups', cascade="all,delete", lazy='subquery')
+    alphabetic_groups = relationship('AlphabeticGroups', cascade="all,delete", lazy='subquery')
+    model_features = relationship('ModelFeatures', cascade="all,delete", lazy='subquery')
 
 
 class NumberGroups(BASE):
 
     __tablename__ = 'number_groups'
 
-    game = Column(String(100), ForeignKey('lotto_games.game_name'), primary_key=True)
+    game = Column(String(100), ForeignKey('lotto_games.name'), primary_key=True)
     first_group = Column('first_group', String(100))
     second_group = Column('second_group', String(100))
     third_group = Column('third_group', String(100))
@@ -65,7 +68,7 @@ class AlphabeticGroups(BASE):
 
     __tablename__ = 'alphabetic_groups'
 
-    game = Column(String(100), ForeignKey('lotto_games.game_name'), primary_key=True)
+    game = Column(String(100), ForeignKey('lotto_games.name'), primary_key=True)
     group_A = Column('group_A', String(100))
     group_B = Column('group_B', String(100))
     group_C = Column('group_C', String(100))
@@ -83,10 +86,10 @@ class ModelFeatures(BASE):
     __tablename__ = 'features'
 
     id = Column('id', Integer, primary_key=True)
-    game = Column(String(100), ForeignKey('lotto_games.game_name'))
-    feature_name = Column('feature_name', String(100))
-    feature_length = Column('feature_length', Integer)
-    feature_header = Column('feature_header', String(100))
+    game = Column(String(100), ForeignKey('lotto_games.name'))
+    name = Column('name', String(100))
+    length = Column('length', Integer)
+    header = Column('header', String(100))
 
 
 class DatabaseModels(BASE):

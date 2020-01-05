@@ -2,10 +2,13 @@ import sys
 import math
 import requests
 import datetime
+import fileinput
 from games_config import CONFIG
-from db_analysis import LotteryDatabase
+from db_manage import LotteryDatabase
+# from db_analysis import LotteryDatabase
 import pandas as pd
-from dask import dataframe
+from db_models import *
+# from dask import dataframe
 
 from sklearn import model_selection
 
@@ -19,9 +22,9 @@ from sklearn.metrics import (accuracy_score,
 
 from hyperopt import STATUS_OK, Trials, tpe, hp, fmin, space_eval
 
-from keras.models import Sequential
-from keras.layers.core import Dense, Dropout, Activation
-from keras.optimizers import Adadelta, Adam, rmsprop
+# from keras.models import Sequential
+# from keras.layers.core import Dense, Dropout, Activation
+# from keras.optimizers import Adadelta, Adam, rmsprop
 
 form = 'form-a4251ea9cfceec0e0003ead731f36e8d'
 
@@ -115,12 +118,12 @@ class TestTF:
 
     def generate_df_pieces(self, connection, chunk_size, offset, ids):
 
-        last_row = self.ldb.db_get_length('MODEL_ml')
+        last_row = self.ldb.get_table_length('MODEL_ml')
         chunks = int(math.ceil(last_row / chunk_size))
         n_chunk = 1
 
-        self.ldb.db_delete_view('tempView')
-        self.ldb.db_create_view('tempView', ",".join(['DRAFT_ID'] + self.table_headers + ['LABEL']), 'MODEL_ml')
+        self.ldb.delete_view('tempView')
+        self.ldb.create_view('tempView', ",".join(['DRAFT_ID'] + self.table_headers + ['LABEL']), 'MODEL_ml')
 
         while True:
             print(str.format('Collecting data from database... {} of {}', n_chunk, chunks))
@@ -167,8 +170,52 @@ class TestTF:
         return {'loss': -acc, 'params': params, 'status': STATUS_OK}
 
 
+def create_model(current_game_name):
+
+    models = 'db_models.py'
+
+    model_found = False
+    ldb = LotteryDatabase(True)
+
+    curr_game = ldb.fetchone(LottoGame, {'game_name': current_game_name})
+
+    if ldb.check_model_exist_by_table_name(curr_game.input_model):
+        model_class = ldb.set_model_by_table_name(curr_game.input_model)
+        model_class.__table__.drop(ldb.engine)
+
+    with open(models, 'r') as models_file:
+        models_code = models_file.readlines()
+
+    try:
+        with open(models, 'w') as models_file:
+            for code_line in models_code:
+                if curr_game.input_model in code_line:
+                    model_found = True
+                if model_found:
+                    if code_line.strip() == '':
+                        model_found = False
+                if not model_found:
+                    models_file.write(code_line)
+
+            model_list = ['class {}(BASE):'.format(curr_game.input_model) + '\n',
+                          "    __tablename__ = '{}'".format('INPUT_' + curr_game.game_table) + '\n',
+                          "    id = Column('id', Integer, primary_key=True)" + '\n']
+
+            model_list += ["    {} = Column('{}', Integer)".format('NR_'.lower() + str(n), 'NR_' + str(n)) + '\n'
+                           for n in range(1, curr_game.game_len + 1)]
+
+            models_file.write('\n\n')
+            models_file.writelines(model_list)
+
+        BASE.metadata.create_all(bind=ldb.engine)
+
+    except Exception:
+        with open(models, 'w') as models_file:
+            models_file.writelines(models_code)
+        raise
+
+
 if __name__ == '__main__':
-    TF = TestTF()
-    TF.main_tf()
+    create_model('poland_mini_lotto')
 
 

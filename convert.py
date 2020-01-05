@@ -13,7 +13,7 @@ from db_models import *
 from db_manage import LotteryDatabase
 
 
-class ConvertMain:
+class ConvertModel:
 
     def __init__(self, worker, initial_table=True, last_draw=None, limit=0):
 
@@ -26,8 +26,8 @@ class ConvertMain:
 
             self.ldb = LotteryDatabase()
 
-            self.curr_game = self.ldb.db_fetchone(LottoGame, {'game_name': self.game_name})
-            self.ldb_original = 'INPUT_' + self.curr_game.game_table
+            self.curr_game = self.ldb.fetchone(LottoGame, {'game_name': self.game_name})
+            self.input_table = 'INPUT_' + self.curr_game.game_table
 
             # features
             table_headers = [Column('id', Integer, primary_key=True),
@@ -36,20 +36,20 @@ class ConvertMain:
             self.features = self.curr_game.model_features
 
             for feature in self.features:
-                match_items = self.worker.window.list_model.findItems(feature.feature_name, Qt.MatchExactly)
+                match_items = self.worker.window.list_model.findItems(feature.name, Qt.MatchExactly)
                 if len(match_items) > 0:
-                    feature_len = feature.feature_length + 1
-                    feature_header = feature.feature_header
+                    feature_len = feature.length + 1
+                    feature_header = feature.header
                     table_headers += [Column(feature_header + str(n), Integer) for n in range(1, feature_len)]
 
             table_headers += [Column('LABEL', Integer)]
 
             # db_initialize
 
-            self.ldb.db_delete_table(self.table_name)
-            self.ldb.db_create_table(self.table_name, table_headers)
+            self.ldb.delete_table(self.table_name)
+            self.ldb.create_table(self.table_name, table_headers)
 
-            self.original_len = self.ldb.db_get_length(self.ldb_original, True) + 1 - limit
+            self.original_len = self.ldb.get_table_length(self.input_table, True) + 1 - limit
 
             # variables
             if last_draw is None:
@@ -59,7 +59,7 @@ class ConvertMain:
 
             self.lottery_interval = self.curr_game.total_numbers + 1
             self.training_size = int(self.worker.window.combo_test_size.currentText())
-            self.cut = self.curr_game.game_len + 1
+            self.game_len = self.curr_game.game_len + 1
 
             self.labels = [0, 12, 34, 56]
             self.win = [1]
@@ -304,8 +304,8 @@ class ConvertMain:
             writer.writerow(export_columns)
 
             for o in range(1, self.original_len):
-                fetch_one = list(self.ldb.db_fetchone(self.table_name, o))
-                fetch_output = list(self.ldb.db_fetchone('OUTPUT_prediction', o))
+                fetch_one = list(self.ldb.fetchone(self.table_name, o))
+                fetch_output = list(self.ldb.fetchone('OUTPUT_prediction', o))
 
                 originals = fetch_one[1:50]
                 label_column = [fetch_one[-1]]
@@ -328,12 +328,12 @@ class ConvertMain:
         fetch_one = []
 
         for o in range(1, self.original_len):
-            curr_cycle = self.__append_numbers_cycle(fetch_one[1:self.cut], curr_cycle)
+            curr_cycle = self.__append_numbers_cycle(fetch_one[1:self.game_len], curr_cycle)
 
             self.ldb.db_commit()
-            fetch_one = list(self.ldb.db_fetchone(self.ldb_original, o))
+            fetch_one = list(self.ldb.fetchone(self.input_table, o))
 
-        curr_cycle = self.__append_numbers_cycle(fetch_one[1:self.cut], curr_cycle)
+        curr_cycle = self.__append_numbers_cycle(fetch_one[1:self.game_len], curr_cycle)
 
         return curr_cycle
 
@@ -345,12 +345,12 @@ class ConvertMain:
         fetch_one = []
 
         for o in range(1, self.original_len):
-            curr_draw = self.__append_in_last_draw(fetch_one[1:self.cut], curr_draw)
+            curr_draw = self.__append_in_last_draw(fetch_one[1:self.game_len], curr_draw)
 
             self.ldb.db_commit()
-            fetch_one = list(self.ldb.db_fetchone(self.ldb_original, o))
+            fetch_one = list(self.ldb.fetchone(self.input_table, o))
 
-        curr_draw = self.__append_in_last_draw(fetch_one[1:self.cut], curr_draw)
+        curr_draw = self.__append_in_last_draw(fetch_one[1:self.game_len], curr_draw)
 
         return curr_draw
 
@@ -358,13 +358,13 @@ class ConvertMain:
 
         top_numbers = {}
 
-        sql_ct = str.format("SELECT * FROM {} limit {} offset {}", self.ldb_original, 100, offset-100)
+        sql_ct = str.format("SELECT * FROM {} limit {} offset {}", self.input_table, 100, offset-100)
 
-        self.ldb.db_execute(sql_ct)
+        self.ldb.execute(sql_ct)
         last = self.ldb.db_fetchmany(offset)
 
         for sample in last:
-            for s in sample[1:self.cut]:
+            for s in sample[1:self.game_len]:
 
                 if str(s) not in top_numbers:
                     top_numbers[str(s)] = 0
@@ -376,9 +376,9 @@ class ConvertMain:
 
         pairs = {}
 
-        sql_ct = str.format("SELECT * FROM {} limit {} offset {}", self.ldb_original, 366, self.original_len - 367)
+        sql_ct = str.format("SELECT * FROM {} limit {} offset {}", self.input_table, 366, self.original_len - 367)
 
-        self.ldb.db_execute(sql_ct)
+        self.ldb.execute(sql_ct)
         last = self.ldb.c.fetchmany(self.original_len)
 
         for sample in last:
@@ -430,12 +430,12 @@ class ConvertMain:
         
         for o in range(1, self.original_len):
 
-            curr_cycle = self.__append_numbers_cycle(fetch_one[1:self.cut], curr_cycle)
-            curr_draw = self.__append_in_last_draw(fetch_one[1:self.cut], curr_draw)
+            curr_cycle = self.__append_numbers_cycle(fetch_one[1:self.game_len], curr_cycle)
+            curr_draw = self.__append_in_last_draw(fetch_one[1:self.game_len], curr_draw)
             top_numbers = self.__create_top_numbers(o)
 
-            fetch_one = list(self.ldb.db_fetchone(self.ldb_original, o))
-            my_list = self.__add_random(fetch_one[1:self.cut], self.training_size)
+            fetch_one = list(self.ldb.fetchone(self.input_table, o))
+            my_list = self.__add_random(fetch_one[1:self.game_len], self.training_size)
 
             end_time = time.time()
             avg_time = (avg_time + (end_time - start_time)) / o
@@ -465,7 +465,7 @@ class ConvertMain:
 
                                                     elif list_model.item(i).text() == 'number_cycles':
                                                         combined_set += self.__append_numbers_cycle(
-                                                            fetch_one[1:self.cut], curr_cycle)
+                                                            fetch_one[1:self.game_len], curr_cycle)
 
                                                     elif list_model.item(i).text() == 'original_numbers':
                                                         combined_set += sample_array
@@ -496,7 +496,7 @@ class ConvertMain:
                                                             top_numbers, 20, 'S')
 
                                                 label = [self.__append_count_label(sample_array,
-                                                                                   fetch_one[1:self.cut])]
+                                                                                   fetch_one[1:self.game_len])]
 
                                                 if self.worker.window.check_win_loss.isChecked():
 
@@ -556,7 +556,7 @@ class ConvertMain:
     def __create_rash_group(self):
 
         self.ldb = LotteryDatabase()
-        fetch_a = self.ldb.db_execute(self.ldb_original)
+        fetch_a = self.ldb.execute(self.input_table)
 
         first_data_group = defaultdict(int)
         second_data_group = defaultdict(int)
