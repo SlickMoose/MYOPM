@@ -3,6 +3,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
 BASE = declarative_base()
+FRESH_BASE = declarative_base()
 
 
 class UserProfile(BASE):
@@ -52,6 +53,7 @@ class LottoGame(BASE):
     number_groups = relationship('NumberGroups', cascade="all,delete", lazy='subquery')
     alphabetic_groups = relationship('AlphabeticGroups', cascade="all,delete", lazy='subquery')
     model_features = relationship('ModelFeatures', cascade="all,delete", lazy='subquery')
+    user_tables = relationship('DatabaseModels', cascade="all,delete", lazy='subquery')
 
 
 class NumberGroups(BASE):
@@ -96,4 +98,6 @@ class DatabaseModels(BASE):
 
     __tablename__ = 'model_database'
 
-    database_name = Column('database_name', String(100), primary_key=True)
+    id = Column('id', Integer, primary_key=True)
+    game = Column(String(100), ForeignKey('lotto_games.name'))
+    database_name = Column('database_name', String(100))

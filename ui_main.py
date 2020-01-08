@@ -87,13 +87,13 @@ class Window(QtBaseClass, Ui_MainWindow):
 
         self.ldb.update_record(UserSettings,
                                {'user_parent': 'default',
-                            'line_current_game': self.line_current_game.text()},
+                                'line_current_game': self.line_current_game.text()},
                                user_config)
 
     def get_user_settings(self):
 
         user_config = self.ldb.fetchone(UserSettings, {'user_parent': 'default',
-                                                          'line_current_game': self.line_current_game.text()})
+                                                       'line_current_game': self.line_current_game.text()})
 
         self.check_win_loss.setChecked(user_config.check_win_loss)
         self.check_add_random.setChecked(user_config.check_add_random)
@@ -127,6 +127,15 @@ class Window(QtBaseClass, Ui_MainWindow):
 
     def delete_feature(self):
         self.list_model.takeItem(self.list_model.currentRow())
+
+        list_model = '|'.join([str(self.list_model.item(i).text()) for i in range(self.list_model.count())])
+
+        user_config = {'list_model': list_model}
+
+        self.ldb.update_record(UserSettings,
+                               {'user_parent': 'default',
+                                'line_current_game': self.line_current_game.text()},
+                               user_config)
 
     def update_add_feature_list(self, item):
         self.list_model.addItem(item)
@@ -315,19 +324,26 @@ class ModelAddDialog(QtBaseAddClass, Ui_AddDialog):
         features = self.ldb.fetchall(ModelFeatures, {'game': self.window.line_current_game.text()})
         for feature in features:
             self.list_add_available.addItem(feature.name)
+        for i in range(self.window.list_model.count()):
+            self.list_feature_order.addItem(self.window.list_model.item(i).text())
 
     def add_feature(self):
 
-        duplicate_check = False
         self.window.list_model.clear()
 
-        for i in range(self.list_feature_order.count()):
-            for j in range(self.window.list_model.count()):
-                if self.list_feature_order.item(i).text() == self.window.list_model.item(j).text():
-                    duplicate_check = True
+        feature_count = self.list_feature_order.count()
 
-            if not duplicate_check:
-                self.signal_add_to_model.emit(self.list_feature_order.item(i).text())
+        list_model = '|'.join([str(self.list_feature_order.item(i).text()) for i in range(feature_count)])
+
+        user_config = {'list_model': list_model}
+
+        self.ldb.update_record(UserSettings,
+                               {'user_parent': 'default',
+                                'line_current_game': self.window.line_current_game.text()},
+                               user_config)
+
+        for model in list_model.split('|'):
+            self.signal_add_to_model.emit(model)
 
         self.close_dialog()
 
@@ -362,13 +378,13 @@ class DatabaseManagerDialog(QtBaseDbClass, Ui_DbDialog):
 
     def db_manager_init(self):
 
-        models = self.ldb.fetchall(DatabaseModels, {})
+        curr_game = self.ldb.fetchone(LottoGame, {'name': self.window.line_current_game.text()})
 
-        for model in models:
-            if model.database_name.startswith('MODEL_'):
-                self.list_model_db.addItem(model.database_name.replace('MODEL_', ''))
-            elif model.database_name.startswith('PREDICT_'):
-                self.list_predict_db.addItem(model.database_name.replace('PREDICT_', ''))
+        for table in curr_game.user_tables:
+            if table.database_name.startswith('MODEL_'):
+                self.list_model_db.addItem(table.database_name.replace('MODEL_', ''))
+            elif table.database_name.startswith('PREDICT_'):
+                self.list_predict_db.addItem(table.database_name.replace('PREDICT_', ''))
 
     def add_model(self):
 
@@ -387,6 +403,7 @@ class DatabaseManagerDialog(QtBaseDbClass, Ui_DbDialog):
                 else:
                     self.created[text] = 0
                     self.list_model_db.addItem(text)
+                    self.line_model.clear()
 
     def add_predict(self):
 
@@ -405,6 +422,7 @@ class DatabaseManagerDialog(QtBaseDbClass, Ui_DbDialog):
                 else:
                     self.created[text] = 1
                     self.list_predict_db.addItem(text)
+                    self.line_predict.clear()
 
     def delete_model(self):
         if len(self.list_model_db.selectedItems()) > 0:
@@ -420,21 +438,28 @@ class DatabaseManagerDialog(QtBaseDbClass, Ui_DbDialog):
 
         self.window.combo_db.clear()
         self.window.combo_predict_model.clear()
+        self.ldb.create_new_session()
 
         for key, value in self.deleted.items():
             if value == 0:
-                self.ldb.delete_record(DatabaseModels, {'database_name': 'MODEL_' + key})
+                self.ldb.delete_record(DatabaseModels, {'game': self.window.line_current_game.text(),
+                                                        'database_name': 'MODEL_' + key})
             elif value == 1:
-                self.ldb.delete_record(DatabaseModels, {'database_name': 'PREDICT_' + key})
+                self.ldb.delete_record(DatabaseModels, {'game': self.window.line_current_game.text(),
+                                                        'database_name': 'PREDICT_' + key})
 
         for key, value in self.created.items():
             if value == 0:
-                self.ldb.add_record(DatabaseModels, {'database_name': 'MODEL_' + key})
+                self.ldb.add_record(DatabaseModels, {'game': self.window.line_current_game.text(),
+                                                     'database_name': 'MODEL_' + key})
                 self.window.combo_db.addItem(key)
             elif value == 1:
-                self.ldb.add_record(DatabaseModels, {'database_name': 'PREDICT_' + key})
+                self.ldb.add_record(DatabaseModels, {'game': self.window.line_current_game.text(),
+                                                     'database_name': 'PREDICT_' + key})
                 self.window.combo_predict_model.addItem(key)
 
+        self.ldb.session_commit()
+        self.ldb.session_close()
         self.close_db_manager()
 
     def close_db_manager(self):
@@ -527,6 +552,9 @@ class ThreadClass(QtCore.QThread):
                     except Exception as exc:
                         self.signal_infobox.emit('Error', 'Something went wrong!! ' + str(exc))
                         self.signal_progress_bar.emit(0)
+
+            else:
+                self.signal_infobox.emit('Missing', 'Select model first!')
 
         elif process_name == "process_embedded":
 
@@ -622,8 +650,6 @@ class ThreadClass(QtCore.QThread):
                 curr_game = ldb.fetchone(LottoGame, {'name': self.window.line_current_game.text()})
 
                 if not ldb.check_model_exist_by_table_name('INPUT_' + curr_game.input_table):
-                    # ldb.delete_table('INPUT_' + curr_game.game_table)
-                    # ldb.delete_model(curr_game.input_model)
 
                     input_params = {'__tablename__': 'INPUT_' + curr_game.input_table,
                                     'id': Column('id', Integer, primary_key=True)}
@@ -633,7 +659,7 @@ class ThreadClass(QtCore.QThread):
                     ldb.create_class_model(curr_game.input_model, input_params)
                     ldb.meta_create_all()
 
-                imported, rejected = ldb.import_file(curr_game.input_model, file_name, curr_game.game_len + 1)
+                imported, rejected = ldb.import_file('INPUT_' + curr_game.input_table, file_name, curr_game.length + 1)
 
                 self.signal_infobox.emit('Completed', str.format(
                     'Lottery data imported! \n '

@@ -4,7 +4,6 @@ import numpy as np
 import requests
 import sqlalchemy
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.orm.instrumentation import register_class, unregister_class
 from sqlalchemy.sql import text
 from sqlalchemy import exists, Table, MetaData
 from PyQt5 import QtCore
@@ -14,6 +13,7 @@ from db_models import *
 from games_config import CONFIG
 
 DATABASE_ENGINE = 'sqlite:///database/MYOPM.db'
+DYNAMIC_CLASS = {}
 
 
 class LotteryDatabase:
@@ -25,12 +25,13 @@ class LotteryDatabase:
         if not os.path.exists('database'):
             os.makedirs('database')
 
-        self.engine = sqlalchemy.create_engine(DATABASE_ENGINE, echo=True)
+        self.engine = sqlalchemy.create_engine(DATABASE_ENGINE, echo=False)
         self.session = sessionmaker(bind=self.engine)
         self.new_session = None
+        BASE.metadata.bind = self.engine
 
         if initial:
-            BASE.metadata.create_all(bind=self.engine)
+            BASE.metadata.create_all()
             self._initial_user_profile()
             self._initial_add_games()
             self._initial_database()
@@ -90,24 +91,35 @@ class LotteryDatabase:
 
             for i in range(1, curr_game.length + 1):
                 input_params['NR_' + str(i)] = Column('NR_' + str(i), Integer)
+
             self.create_class_model(curr_game.input_model, input_params)
 
             # Create model for training & prediction table
-            training_params = {'__tablename__': 'MODEL_' + curr_game.input_table,
-                               'id': Column('id', Integer, primary_key=True)}
 
-            predict_params = {'__tablename__': 'PREDICT_' + curr_game.input_table,
-                              'id': Column('id', Integer, primary_key=True)}
+            for table in curr_game.user_tables:
+                if table.database_name.startswith('MODEL_'):
+                    training_params = {'__tablename__': table.database_name,
+                                       'id': Column('id', Integer, primary_key=True)}
 
-            for selected_feature in user_settings.split('|'):
-                for feature in curr_game.model_features:
-                    if feature.name == selected_feature:
-                        for i in range(1, feature.length + 1):
-                            input_params[feature.header + str(i)] = Column(feature.header + str(i), Integer)
-                            input_params[feature.header + str(i)] = Column(feature.header + str(i), Integer)
+                    for selected_feature in user_settings.split('|'):
+                        for feature in curr_game.model_features:
+                            if feature.name == selected_feature:
+                                for i in range(1, feature.length + 1):
+                                    training_params[feature.header + str(i)] = Column(feature.header + str(i), Integer)
 
-            self.create_class_model(curr_game.training_model, training_params)
-            self.create_class_model(curr_game.predict_model, predict_params)
+                    self.create_class_model(curr_game.training_model, training_params)
+
+                elif table.database_name.startswith('PREDICT_'):
+                    predict_params = {'__tablename__': table.database_name,
+                                      'id': Column('id', Integer, primary_key=True)}
+
+                    for selected_feature in user_settings.split('|'):
+                        for feature in curr_game.model_features:
+                            if feature.name == selected_feature:
+                                for i in range(1, feature.length + 1):
+                                    predict_params[feature.header + str(i)] = Column(feature.header + str(i), Integer)
+
+                    self.create_class_model(curr_game.predict_model, predict_params)
 
         self.meta_create_all()
         self.session_close()
@@ -120,11 +132,11 @@ class LotteryDatabase:
             .scalar()
 
         if not user_exists:
-            self.new_session.add(UserProfile(user_name='default',
-                                             active=True))
-            self.session_flush()
 
-            self.new_session.add(UserSettings(user_parent='default',
+            user_profile = UserProfile(user_name='default',
+                                       active=True)
+
+            user_profile.user_settings.append(UserSettings(user_parent='default',
                                               line_current_game='poland_mini_lotto',
                                               combo_db='',
                                               combo_test_size='',
@@ -139,15 +151,14 @@ class LotteryDatabase:
                                               check_keras=False,
 
                                               list_model=''))
+
+            self.new_session.add(user_profile)
             self.session_commit()
 
         self.session_close()
 
     def add_record(self, model_class, params):
-        self.create_new_session()
         self.new_session.add(model_class(**params))
-        self.session_commit()
-        self.session_close()
 
     def add_user(self, user_name, is_active=False):
         self.create_new_session()
@@ -176,52 +187,38 @@ class LotteryDatabase:
     @staticmethod
     def create_class_model(class_name, params):
         _ = type(class_name, (BASE,), params)
+        DYNAMIC_CLASS[class_name] = _
 
     def create_new_session(self):
         self.new_session = self.session()
 
-    def create_table(self, table_name, args):
-
-        try:
-            if not self.engine.dialect.has_table(self.engine, table_name):
-                BASE.metadata.reflect(self.engine)
-                _ = Table(table_name, BASE.metadata, *args)
-                BASE.metadata.create_all(bind=self.engine)
-        except Exception as exp:
-            self.signal_db_error.emit('Error!', exp)
+    def create_table(self, class_name, table_name, params):
+       pass
 
     @staticmethod
-    def delete_model(class_name):
-        try:
-            delattr(BASE, class_name)
-        except Exception:
-            raise
+    def delete_model_by_table_name(table_name):
+        for model in BASE._decl_class_registry.values():
+            if hasattr(model, '__tablename__') and model.__tablename__ == table_name:
+                del model._decl_class_registry[model.__name__]
+                BASE.metadata.clear()
+                if model.__name__ in DYNAMIC_CLASS:
+                    del DYNAMIC_CLASS[model.__name__]
+                    break
 
     def delete_record(self, model_class, params):
-
-        self.create_new_session()
         model_query = self.new_session.query(model_class).filter_by(**params).first()
-
         if model_query is not None:
             self.new_session.query(model_class).filter_by(**params).delete()
-            self.session_commit()
-        self.session_close()
 
-    def delete_table(self, table_name):
+    @staticmethod
+    def delete_table(table_name):
         try:
-            metadata = MetaData(self.engine, reflect=True)
-            delete_table = metadata.tables.get(table_name)
+            BASE.metadata.reflect()
+            delete_table = BASE.metadata.tables.get(table_name)
             if delete_table is not None:
-                BASE.metadata.drop_all(bind=self.engine, tables=[delete_table], checkfirst=True)
-        except Exception:
-            raise
-
-    def delete_view(self, params):
-
-        try:
-            self.execute('DROP VIEW IF EXISTS ' + params)
-        except Exception as exp:
-            self.signal_db_error.emit('Error!', exp)
+                BASE.metadata.drop_all(tables=[delete_table], checkfirst=True)
+        except Exception as exc:
+            print(exc)
 
     def execute(self, params):
 
@@ -251,9 +248,9 @@ class LotteryDatabase:
 
     def import_file(self, model_class, filename, game_size):
 
-        imported, rejected = 0, 0
-
         self.create_new_session()
+
+        imported, rejected = 0, 0
         input_table = self.set_model_by_table_name(model_class)
 
         if input_table is not None:
@@ -264,28 +261,22 @@ class LotteryDatabase:
 
                 for line in lines:
 
-                    params = {}
                     my_array = np.fromstring(line, dtype=int, sep=',').tolist()
 
                     try:
 
-                        params['id'] = my_array[0]
+                        params = {'id': my_array[0]}
                         for i in range(1, game_size):
                             params['NR_' + str(i)] = my_array[i]
-                            i += 1
 
                         self.add_record(input_table, params)
-                        self.session_flush()
                         imported += 1
 
-                    except Exception:
-                        raise
-                    finally:
+                    except:
                         rejected += 1
 
             self.session_commit()
-
-        self.session_close()
+            self.session_close()
 
         return imported, rejected
 
@@ -301,8 +292,6 @@ class LotteryDatabase:
         BASE.metadata.reflect(self.engine)
 
         table_headers = ",".join(['ID INTEGER PRIMARY KEY'] + ['LA_JOLLA_' + str(n) + ' INTEGER' for n in range(1, 6)])
-
-        self.create_table('LA_JOLLA', table_headers)
 
         for int_t in t:
 
@@ -339,8 +328,15 @@ class LotteryDatabase:
 
         return imported, rejected
 
-    def meta_create_all(self):
-        BASE.metadata.create_all(self.engine)
+    def limit_offset_query(self, class_model, limit, offset):
+        return self.new_session.query(class_model)\
+                                .filter(class_model.id >= offset)\
+                                .filter(class_model.id <= limit).all()
+
+    @staticmethod
+    def meta_create_all():
+        BASE.metadata.reflect()
+        BASE.metadata.create_all()
 
     def session_flush(self):
         self.new_session.flush()
@@ -353,7 +349,7 @@ class LotteryDatabase:
         for model in BASE._decl_class_registry.values():
             if hasattr(model, '__tablename__') and model.__tablename__ == table_name:
                 return model
-        return False
+        return None
 
     def update_record(self, model_class, params, query_keys):
 

@@ -4,7 +4,7 @@ import requests
 import datetime
 import fileinput
 from games_config import CONFIG
-from db_manage import LotteryDatabase
+from db_manage import LotteryDatabase, unregister_class
 # from db_analysis import LotteryDatabase
 import pandas as pd
 from db_models import *
@@ -169,6 +169,20 @@ class TestTF:
 
         return {'loss': -acc, 'params': params, 'status': STATUS_OK}
 
+def declarative_change():
+
+    ldb = LotteryDatabase(True)
+
+    class1 = type('Class1', (BASE,), {'__tablename__': 'test',
+                                      'id': Column('id', Integer, primary_key=True)})
+
+    # unregister_class(class1)
+
+
+    class1 = type('Class1', (BASE,), {'__tablename__': 'test1',
+                                      'id': Column('id', Integer, primary_key=True)})
+
+    print(class1)
 
 def create_model(current_game_name):
 
@@ -216,6 +230,6 @@ def create_model(current_game_name):
 
 
 if __name__ == '__main__':
-    create_model('poland_mini_lotto')
+    declarative_change()
 
 
